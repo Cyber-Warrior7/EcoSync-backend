@@ -1,0 +1,8 @@
+fastapi==0.124.4
+google-generativeai==0.8.5
+httpx==0.28.1
+python-dotenv==1.2.1
+python-multipart==0.0.20
+uvicorn==0.38.0
+pydantic==2.12.5
+starlette==0.50.0

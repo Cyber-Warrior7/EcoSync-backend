@@ -1,0 +1,2 @@
+"""EcoSync backend package initializer."""
+
