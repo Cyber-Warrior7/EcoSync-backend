@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from array import array
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -82,6 +83,15 @@ def init_db() -> None:
     )
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS mobilenet_embeddings (
+            post_id TEXT,
+            user_id TEXT,
+            vector BLOB
+        );
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS user_settings (
             user_id TEXT PRIMARY KEY,
             username TEXT,
@@ -126,8 +136,34 @@ def init_db() -> None:
     conn.commit()
     conn.close()
 
+def purge_rejected_posts(max_age_hours: int = 24) -> None:
+    """Delete rejected posts older than the given age (also removes embeddings)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+    stale_ids: List[str] = []
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, created_at FROM posts WHERE status = 'rejected'")
+    for row in cur.fetchall():
+        created_raw = row["created_at"]
+        if not created_raw:
+            continue
+        try:
+            dt = datetime.fromisoformat(created_raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            if dt < cutoff:
+                stale_ids.append(row["id"])
+        except Exception:
+            continue
+    conn.close()
+    for post_id in stale_ids:
+        delete_post_record(post_id)
+
 
 def list_posts(limit: int = 25) -> List[Dict[str, Any]]:
+    purge_rejected_posts()
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT * FROM posts ORDER BY datetime(created_at) DESC LIMIT ?", (limit,))
@@ -302,6 +338,32 @@ def get_embeddings() -> List[Dict[str, Any]]:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT post_id, user_id, vector FROM embeddings")
+    rows = []
+    for row in cur.fetchall():
+        vec_bytes = row["vector"]
+        arr = array("f")
+        arr.frombytes(vec_bytes)
+        rows.append({"post_id": row["post_id"], "user_id": row["user_id"], "vector": list(arr)})
+    conn.close()
+    return rows
+
+
+def save_mobilenet_embedding(post_id: str, user_id: str, vector: List[float]) -> None:
+    buf = array("f", vector).tobytes()
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO mobilenet_embeddings (post_id, user_id, vector) VALUES (?, ?, ?)",
+        (post_id, user_id, sqlite3.Binary(buf)),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_mobilenet_embeddings() -> List[Dict[str, Any]]:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT post_id, user_id, vector FROM mobilenet_embeddings")
     rows = []
     for row in cur.fetchall():
         vec_bytes = row["vector"]

@@ -13,7 +13,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 @router.post("/signup", response_model=UserWithToken, status_code=status.HTTP_201_CREATED)
 async def signup(payload: UserCreate, settings: Settings = Depends(get_settings)) -> UserWithToken:
-    if not payload.email.lower().endswith("@gmail.com") and not payload.email.lower().endswith("@student.mes.ac.in"):
+    email_l = payload.email.lower()
+    if not email_l.endswith("@gmail.com") and not email_l.endswith("@student.mes.ac.in"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Use Gmail or student.mes.ac.in email")
     if get_user_by_email(payload.email):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="User already exists")

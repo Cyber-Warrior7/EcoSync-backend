@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..auth_utils import get_current_user, require_admin
+from ..ai_client import call_ai_service
 from ..config import Settings, get_settings
 from ..db import (
     add_post,
@@ -101,16 +102,34 @@ async def create_post(
         return Post(**updated) if updated else Post(**base_doc)
 
     verdict, notes = await assess_image_authenticity(media_bytes, settings)
-    if notes == "offline-auto-verified" or settings.offline_mode or not settings.gemini_api_key:
-        update_post(
-            post_id,
-            {
-                "verified": False,
-                "status": "pending",
-                "review_notes": notes,
-                "credits_awarded": 0,
-            },
-        )
+    gemini_issue = isinstance(notes, str) and notes.startswith("gemini-error")
+    if settings.offline_mode or not settings.gemini_api_key or notes == "offline-auto-verified" or gemini_issue:
+        ai_result = await call_ai_service(media_bytes, payload.user_id, post_id)
+        if ai_result:
+            status_val = ai_result.get("status", "pending")
+            credits_val = int(ai_result.get("credits_awarded", 0) or 0)
+            is_verified = status_val == "verified"
+            update_post(
+                post_id,
+                {
+                    "verified": is_verified,
+                    "status": status_val,
+                    "review_notes": ai_result.get("notes", notes),
+                    "credits_awarded": credits_val,
+                },
+            )
+            if is_verified and credits_val > 0:
+                adjust_credits(payload.user_id, credits_val)
+        else:
+            update_post(
+                post_id,
+                {
+                    "verified": False,
+                    "status": "pending",
+                    "review_notes": notes,
+                    "credits_awarded": 0,
+                },
+            )
     elif verdict:
         credits = settings.default_reward_per_post
         update_post(
@@ -128,7 +147,7 @@ async def create_post(
             post_id,
             {
                 "verified": False,
-                "status": "rejected",
+                "status": "pending",
                 "credits_awarded": 0,
                 "review_notes": notes,
             },
@@ -173,6 +192,35 @@ async def approve_post(
     )
     if delta != 0:
         adjust_credits(existing["user_id"], delta)
+    saved = get_post(post_id)
+    if saved:
+        settings_row = get_user_settings(saved.get("user_id", ""))
+        saved["username"] = settings_row.get("username") if settings_row else ""
+    return Post(**saved) if saved else Post(**existing)
+
+
+@router.post("/{post_id}/reject", response_model=Post)
+async def reject_post(
+    post_id: str,
+    reason: str | None = None,
+    settings: Settings = Depends(get_settings),
+    current_user: dict = Depends(require_admin),
+) -> Post:
+    existing = get_post(post_id)
+    if not existing:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Post not found")
+    old_credits = int(existing.get("credits_awarded") or 0)
+    update_post(
+        post_id,
+        {
+            "verified": False,
+            "status": "rejected",
+            "review_notes": reason or "Rejected by admin",
+            "credits_awarded": 0,
+        },
+    )
+    if old_credits:
+        adjust_credits(existing["user_id"], -old_credits)
     saved = get_post(post_id)
     if saved:
         settings_row = get_user_settings(saved.get("user_id", ""))
