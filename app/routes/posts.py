@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -21,6 +22,7 @@ from ..schemas import PaginatedPosts, Post, PostCreate
 from ..services.verification import assess_image_authenticity, embed_media, find_near_duplicate, save_embedding
 
 router = APIRouter(prefix="/posts", tags=["posts"])
+AI_SERVICE_URL_ENV = os.getenv("AI_SERVICE_URL")
 
 
 @router.get("", response_model=PaginatedPosts)
@@ -88,18 +90,20 @@ async def create_post(
     add_post(base_doc)
 
     vector, _ = await embed_media(media_bytes, settings)
-    dup = await find_near_duplicate(vector, settings, user_id=payload.user_id)
-    if dup:
-        updated = update_post(
-            post_id,
-            {
-                "status": "rejected",
-                "verified": False,
-                "review_notes": f"Near-duplicate detected (similar to {dup.get('post_id')})",
-                "credits_awarded": 0,
-            },
-        )
-        return Post(**updated) if updated else Post(**base_doc)
+    # Skip local duplicate rejection when external AI service is available to avoid premature rejects
+    if not AI_SERVICE_URL_ENV:
+        dup = await find_near_duplicate(vector, settings, user_id=payload.user_id)
+        if dup:
+            updated = update_post(
+                post_id,
+                {
+                    "status": "rejected",
+                    "verified": False,
+                    "review_notes": f"Near-duplicate detected (similar to {dup.get('post_id')})",
+                    "credits_awarded": 0,
+                },
+            )
+            return Post(**updated) if updated else Post(**base_doc)
 
     verdict, notes = await assess_image_authenticity(media_bytes, settings)
     gemini_issue = isinstance(notes, str) and notes.startswith("gemini-error")
